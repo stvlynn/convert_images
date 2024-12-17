@@ -1,0 +1,11 @@
+# 环境变量文件
+.env
+
+# 进度文件
+conversion_progress_*.yaml
+
+# 日志文件
+*.log
+
+# Mac files
+.DS_Store
