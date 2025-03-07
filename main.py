@@ -12,6 +12,7 @@ from tqdm import tqdm
 import time
 import logging
 from dotenv import load_dotenv
+import shutil
 
 # 加载环境变量
 load_dotenv()
@@ -31,7 +32,9 @@ S3_ENDPOINT = os.getenv('S3_ENDPOINT')
 S3_ACCESS_KEY = os.getenv('S3_ACCESS_KEY')
 S3_SECRET_KEY = os.getenv('S3_SECRET_KEY')
 S3_BUCKET = os.getenv('S3_BUCKET')
-CDN_DOMAIN = os.getenv('CDN_DOMAIN')
+CDN_DOMAIN = os.getenv('CDN_DOMAIN', '').rstrip('/')  # 移除末尾的斜杠，避免路径问题
+IMAGE_PATH_PREFIX = os.getenv('IMAGE_PATH_PREFIX', 'img')  # 图片路径前缀，默认为img
+DELETE_ORIGINAL_IMAGES = os.getenv('DELETE_ORIGINAL_IMAGES', 'false').lower() == 'true'  # 是否删除原图
 
 # 验证必要的环境变量
 required_env_vars = ['S3_ENDPOINT', 'S3_ACCESS_KEY', 'S3_SECRET_KEY', 'S3_BUCKET', 'CDN_DOMAIN']
@@ -40,23 +43,23 @@ if missing_vars:
     raise ValueError(f"缺少必要的环境变量: {', '.join(missing_vars)}\n请复制 .env.example 为 .env 并填写配置")
 
 # 进度文件路径模板
-PROGRESS_FILE_TEMPLATE = 'conversion_progress_{lang}.yaml'
+PROGRESS_FILE_TEMPLATE = 'conversion_progress.yaml'
 
-def get_progress_file(lang):
-    """获取特定语言的进度文件路径"""
-    return PROGRESS_FILE_TEMPLATE.format(lang=lang)
+def get_progress_file():
+    """获取进度文件路径"""
+    return PROGRESS_FILE_TEMPLATE
 
-def load_progress(lang):
-    """加载特定语言的进度信息"""
-    progress_file = get_progress_file(lang)
+def load_progress():
+    """加载进度信息"""
+    progress_file = get_progress_file()
     if os.path.exists(progress_file):
         with open(progress_file, 'r', encoding='utf-8') as f:
             return yaml.safe_load(f) or {}
     return {}
 
-def save_progress(progress, lang):
-    """保存特定语言的进度信息"""
-    progress_file = get_progress_file(lang)
+def save_progress(progress):
+    """保存进度信息"""
+    progress_file = get_progress_file()
     with open(progress_file, 'w', encoding='utf-8') as f:
         yaml.dump(progress, f)
 
@@ -99,11 +102,12 @@ def get_md5(content):
         return hashlib.md5(content.getvalue()).hexdigest()
     return hashlib.md5(content).hexdigest()
 
-def upload_to_s3(img_data, lang, subfolder=''):
+def upload_to_s3(img_data, relative_path=''):
     """上传图片到S3"""
     try:
         md5_name = get_md5(img_data) + '.webp'
-        s3_path = f'img/{lang}/{subfolder}/{md5_name}'.replace('//', '/')
+        # 使用文档的相对路径作为S3路径的一部分
+        s3_path = f'{IMAGE_PATH_PREFIX}/{relative_path}/{md5_name}'.replace('//', '/')
         
         img_data.seek(0)
         s3_client.upload_fileobj(
@@ -118,13 +122,15 @@ def upload_to_s3(img_data, lang, subfolder=''):
         logging.error(f"上传到S3失败: {str(e)}")
         return None
 
-def process_markdown_file(file_path, lang, progress):
+def process_markdown_file(file_path, progress, original_images_to_delete=None):
     """处理单个Markdown文件"""
-    file_key = os.path.relpath(file_path, os.path.dirname(os.path.dirname(file_path)))
+    # 获取相对于根目录的路径作为文件键
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    file_key = os.path.relpath(file_path, base_dir)
     
     # 检查是否已处理
     if file_key in progress:
-        logging.info(f"[{lang}] 跳过已处理的文件: {file_key}")
+        logging.info(f"跳过已处理的文件: {file_key}")
         return True
 
     try:
@@ -149,11 +155,12 @@ def process_markdown_file(file_path, lang, progress):
                 
                 # 如果是远程图片，跳过处理
                 if img_path.startswith(('http://', 'https://')):
-                    logging.info(f"[{lang}] 跳过远程图片: {img_path}")
+                    logging.info(f"跳过远程图片: {img_path}")
                     continue
 
-                # 获取相对路径作为S3子文件夹
-                relative_path = os.path.dirname(os.path.relpath(file_path, os.path.join(os.path.dirname(file_path), '..')))
+                # 获取文档相对于根目录的路径作为S3子文件夹
+                base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                relative_path = os.path.dirname(os.path.relpath(file_path, base_dir))
                 
                 # 转换为绝对路径
                 absolute_img_path = os.path.abspath(os.path.join(os.path.dirname(file_path), img_path))
@@ -162,12 +169,16 @@ def process_markdown_file(file_path, lang, progress):
                 img_data = convert_to_webp(absolute_img_path)
                 if img_data:
                     # 上传到S3
-                    s3_url = upload_to_s3(img_data, lang, relative_path)
+                    s3_url = upload_to_s3(img_data, relative_path)
                     if s3_url:
                         # 替换原文件中的图片链接
                         content = content.replace(match.group(0), match.group(0).replace(img_path, s3_url))
                         modified = True
-                        logging.info(f"[{lang}] 已处理图片: {img_path} -> {s3_url}")
+                        logging.info(f"已处理图片: {img_path} -> {s3_url}")
+                        
+                        # 如果需要删除原图，添加到待删除列表
+                        if DELETE_ORIGINAL_IMAGES and original_images_to_delete is not None:
+                            original_images_to_delete.append(absolute_img_path)
                     else:
                         success = False
                         break
@@ -183,57 +194,93 @@ def process_markdown_file(file_path, lang, progress):
                 'processed_time': time.time(),
                 'status': 'success'
             }
-            save_progress(progress, lang)
-            logging.info(f"[{lang}] 已处理文件: {file_key}")
+            save_progress(progress)
+            logging.info(f"已处理文件: {file_key}")
             return True
         elif not success:
-            logging.warning(f"[{lang}] 处理失败，保持原文件不变: {file_key}")
+            logging.warning(f"处理失败，保持原文件不变: {file_key}")
             return False
         else:
             progress[file_key] = {
                 'processed_time': time.time(),
                 'status': 'no_changes_needed'
             }
-            save_progress(progress, lang)
-            logging.info(f"[{lang}] 文件无需修改: {file_key}")
+            save_progress(progress)
+            logging.info(f"文件无需修改: {file_key}")
             return True
 
     except Exception as e:
-        logging.error(f"[{lang}] 处理文件失败: {file_path}, 错误: {str(e)}")
+        logging.error(f"处理文件失败: {file_path}, 错误: {str(e)}")
         return False
 
-def get_markdown_files(directory):
-    """获取目录下所有的Markdown文件"""
+def get_markdown_files(directory, exclude_dirs=None):
+    """获取目录下所有的Markdown文件，排除指定目录"""
+    if exclude_dirs is None:
+        exclude_dirs = []
+    
+    # 将排除目录转换为绝对路径
+    exclude_dirs_abs = [os.path.abspath(d) for d in exclude_dirs]
+    
     markdown_files = []
-    for root, _, files in os.walk(directory):
+    for root, dirs, files in os.walk(directory):
+        # 检查当前目录是否在排除列表中
+        if any(os.path.abspath(root).startswith(exclude_dir) for exclude_dir in exclude_dirs_abs):
+            continue
+            
         for file in files:
             if file.endswith('.md'):
                 markdown_files.append(os.path.join(root, file))
     return markdown_files
 
-def process_directory(directory, lang):
+def process_directory(directory, use_existing_progress=True, exclude_dirs=None):
     """处理目录下的所有Markdown文件"""
-    progress = load_progress(lang)
-    markdown_files = get_markdown_files(directory)
+    progress_file = get_progress_file()
     
-    with tqdm(total=len(markdown_files), desc=f"处理{lang}文档") as pbar:
+    # 如果选择不使用现有进度，则备份并重置进度文件
+    if not use_existing_progress and os.path.exists(progress_file):
+        backup_file = f"{progress_file}.bak.{int(time.time())}"
+        shutil.copy2(progress_file, backup_file)
+        logging.info(f"已备份进度文件到: {backup_file}")
+        progress = {}
+    else:
+        progress = load_progress()
+    
+    markdown_files = get_markdown_files(directory, exclude_dirs)
+    original_images_to_delete = [] if DELETE_ORIGINAL_IMAGES else None
+    
+    with tqdm(total=len(markdown_files), desc=f"处理Markdown文档") as pbar:
         for file_path in markdown_files:
-            process_markdown_file(file_path, lang, progress)
+            process_markdown_file(file_path, progress, original_images_to_delete)
             pbar.update(1)
+    
+    # 如果需要删除原图
+    if DELETE_ORIGINAL_IMAGES and original_images_to_delete:
+        logging.info(f"开始删除原始图片，共 {len(original_images_to_delete)} 张...")
+        for img_path in original_images_to_delete:
+            try:
+                if os.path.exists(img_path):
+                    os.remove(img_path)
+                    logging.info(f"已删除原始图片: {img_path}")
+            except Exception as e:
+                logging.error(f"删除原始图片失败: {img_path}, 错误: {str(e)}")
 
 def main():
-    # 处理中文、英文、日文文档
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    directories = {
-        'zh_CN': os.path.join(base_dir, 'zh_CN'),
-        'en': os.path.join(base_dir, 'en'),
-        'jp': os.path.join(base_dir, 'jp')
-    }
-
-    for lang, directory in directories.items():
-        logging.info(f"开始处理{lang}文档...")
-        process_directory(directory, lang)
-        logging.info(f"完成处理{lang}文档")
+    # 询问是否从之前的记录开始
+    use_existing_progress = input("是否从之前的记录开始？(y/n): ").lower() == 'y'
+    
+    # 获取根目录（upload_images的上一级目录）
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    
+    # 排除upload_images目录本身
+    upload_images_dir = os.path.dirname(os.path.abspath(__file__))
+    exclude_dirs = [upload_images_dir]
+    
+    logging.info(f"开始处理根目录下的Markdown文档: {base_dir}")
+    logging.info(f"排除目录: {exclude_dirs}")
+    
+    process_directory(base_dir, use_existing_progress, exclude_dirs)
+    
+    logging.info("完成处理所有Markdown文档")
 
 if __name__ == '__main__':
     main()
