@@ -1,11 +1,13 @@
-# 环境变量文件
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
 .env
 
-# 进度文件
-conversion_progress_*.yaml
-
-# 日志文件
+# 日志和进度文件
 *.log
+conversion_progress*.yaml
 
-# Mac files
+# 其他
 .DS_Store
