@@ -5,12 +5,13 @@
 ## 功能特点
 
 - 自动扫描根目录下的所有 Markdown 文件（排除 upload_images 目录本身）
-- 将本地图片转换为 WebP 格式以减小体积
+- 将本地图片转换为 WebP 格式或保留原格式
 - 上传图片到 S3 兼容的对象存储
 - 自动更新 Markdown 文件中的图片链接
 - 支持断点续传，可以从上次处理的位置继续
 - 可配置是否删除原始图片
 - 可自定义图床路径前缀
+- 可选择上传后的图片格式（保留原格式或转换为 WebP）
 
 ## 环境要求
 
@@ -54,6 +55,8 @@ CDN_DOMAIN=https://your-cdn-domain.com
 IMAGE_PATH_PREFIX=img
 # 上传后是否删除原图，true或false
 DELETE_ORIGINAL_IMAGES=false
+# 上传后的图片格式，可选值：original（保留原格式）或webp
+IMAGE_FORMAT=original
 ```
 
 ## 使用方法
@@ -71,8 +74,8 @@ DELETE_ORIGINAL_IMAGES=false
 
 1. 脚本会遍历根目录下的所有 Markdown 文件（排除 upload_images 目录本身）
 2. 对于每个文件，查找其中的图片链接（支持 Markdown 和 HTML 格式）
-3. 将本地图片转换为 WebP 格式
-4. 上传到 S3 存储，路径结构为：`图床前缀/文档相对于根目录的路径/md5值.webp`
+3. 根据配置将本地图片转换为 WebP 格式或保留原格式
+4. 上传到 S3 存储，路径结构为：`图床前缀/文档相对于根目录的路径/md5值.格式后缀`
 5. 更新 Markdown 文件中的图片链接
 6. 记录处理进度，支持断点续传
 
@@ -82,6 +85,8 @@ DELETE_ORIGINAL_IMAGES=false
 - 已经指向 CDN 域名的图片链接会被跳过
 - 进度信息保存在 `conversion_progress.yaml` 文件中
 - 日志信息保存在 `image_conversion.log` 文件中
+- 设置 `IMAGE_FORMAT=webp` 可以减小图片体积，提高加载速度
+- 设置 `IMAGE_FORMAT=original` 可以保留原始图片格式，适合需要保持特定格式的场景
 
 ## 许可证
 

@@ -35,6 +35,7 @@ S3_BUCKET = os.getenv('S3_BUCKET')
 CDN_DOMAIN = os.getenv('CDN_DOMAIN', '').rstrip('/')  # 移除末尾的斜杠，避免路径问题
 IMAGE_PATH_PREFIX = os.getenv('IMAGE_PATH_PREFIX', 'img')  # 图片路径前缀，默认为img
 DELETE_ORIGINAL_IMAGES = os.getenv('DELETE_ORIGINAL_IMAGES', 'false').lower() == 'true'  # 是否删除原图
+IMAGE_FORMAT = os.getenv('IMAGE_FORMAT', 'original').lower()  # 图片格式，默认保留原格式
 
 # 验证必要的环境变量
 required_env_vars = ['S3_ENDPOINT', 'S3_ACCESS_KEY', 'S3_SECRET_KEY', 'S3_BUCKET', 'CDN_DOMAIN']
@@ -72,15 +73,16 @@ s3_client = boto3.client(
     config=Config(signature_version='s3v4')
 )
 
-def convert_to_webp(image_path):
-    """将图片转换为WebP格式"""
+def convert_image(image_path):
+    """将图片转换为指定格式"""
     try:
         # 跳过远程图片
         if image_path.startswith(('http://', 'https://')):
             logging.info(f"跳过远程图片: {image_path}")
-            return None
+            return None, None
 
         img = Image.open(image_path)
+        original_format = img.format.lower() if img.format else 'jpeg'
         
         # 转换为RGB模式（如果是RGBA，保持RGBA）
         if img.mode not in ('RGB', 'RGBA'):
@@ -88,13 +90,20 @@ def convert_to_webp(image_path):
         
         # 创建一个字节流对象
         img_byte_arr = io.BytesIO()
-        img.save(img_byte_arr, format='WEBP', quality=80)
-        img_byte_arr.seek(0)
         
-        return img_byte_arr
+        # 根据配置的格式保存图片
+        if IMAGE_FORMAT == 'webp':
+            img.save(img_byte_arr, format='WEBP', quality=80)
+            img_byte_arr.seek(0)
+            return img_byte_arr, 'webp'
+        else:  # 保留原格式
+            img.save(img_byte_arr, format=img.format, quality=80)
+            img_byte_arr.seek(0)
+            return img_byte_arr, original_format
+            
     except Exception as e:
         logging.error(f"转换图片失败: {image_path}, 错误: {str(e)}")
-        return None
+        return None, None
 
 def get_md5(content):
     """获取内容的MD5值"""
@@ -102,19 +111,22 @@ def get_md5(content):
         return hashlib.md5(content.getvalue()).hexdigest()
     return hashlib.md5(content).hexdigest()
 
-def upload_to_s3(img_data, relative_path=''):
+def upload_to_s3(img_data, relative_path='', img_format='webp'):
     """上传图片到S3"""
     try:
-        md5_name = get_md5(img_data) + '.webp'
+        md5_name = get_md5(img_data) + f'.{img_format}'
         # 使用文档的相对路径作为S3路径的一部分
         s3_path = f'{IMAGE_PATH_PREFIX}/{relative_path}/{md5_name}'.replace('//', '/')
+        
+        # 设置正确的Content-Type
+        content_type = f'image/{img_format}'
         
         img_data.seek(0)
         s3_client.upload_fileobj(
             img_data,
             S3_BUCKET,
             s3_path,
-            ExtraArgs={'ContentType': 'image/webp'}
+            ExtraArgs={'ContentType': content_type}
         )
         
         return f'{CDN_DOMAIN}/{s3_path}'
@@ -165,11 +177,12 @@ def process_markdown_file(file_path, progress, original_images_to_delete=None):
                 # 转换为绝对路径
                 absolute_img_path = os.path.abspath(os.path.join(os.path.dirname(file_path), img_path))
                 
-                # 转换图片为WebP
-                img_data = convert_to_webp(absolute_img_path)
-                if img_data:
+                # 转换图片
+                img_data, img_format = convert_image(absolute_img_path)
+                
+                if img_data and img_format:
                     # 上传到S3
-                    s3_url = upload_to_s3(img_data, relative_path)
+                    s3_url = upload_to_s3(img_data, relative_path, img_format)
                     if s3_url:
                         # 替换原文件中的图片链接
                         content = content.replace(match.group(0), match.group(0).replace(img_path, s3_url))
@@ -277,6 +290,7 @@ def main():
     
     logging.info(f"开始处理根目录下的Markdown文档: {base_dir}")
     logging.info(f"排除目录: {exclude_dirs}")
+    logging.info(f"图片格式设置: {IMAGE_FORMAT}")
     
     process_directory(base_dir, use_existing_progress, exclude_dirs)
     
